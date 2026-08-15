@@ -335,8 +335,7 @@ def build_data(rows, invalid):
         "source_file": CSV_PATH.name,
         "default_compass_selection": {
             "year": latest_planning_row["dt"].year,
-            "month": latest_planning_row["dt"].month,
-            "month_name": MONTH_NAMES[latest_planning_row["dt"].month - 1],
+            "months": [6, 7, 8],
         },
         "summary": summary,
         "active_summary": active_summary,
@@ -1776,7 +1775,7 @@ HTML_TEMPLATE = """<!doctype html>
       document.getElementById("collectionNote").innerHTML = 'Data source: <a href="' + collection.source_url + '" target="_blank" rel="noopener noreferrer">' + collection.source + '</a> wind meter. Collected from ' + collection.start + ' to ' + collection.end + '.';
       selectedYear = String(data.yearly[data.yearly.length - 1].year);
       selectedCompassYears = [String(data.default_compass_selection.year)];
-      selectedCompassMonths = [String(data.default_compass_selection.month)];
+      selectedCompassMonths = data.default_compass_selection.months.map(String);
       render();
     }
 

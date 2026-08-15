@@ -1022,7 +1022,7 @@
       document.getElementById("collectionNote").innerHTML = 'Data source: <a href="' + collection.source_url + '" target="_blank" rel="noopener noreferrer">' + collection.source + '</a> wind meter. Collected from ' + collection.start + ' to ' + collection.end + '.';
       selectedYear = String(data.yearly[data.yearly.length - 1].year);
       selectedCompassYears = [String(data.default_compass_selection.year)];
-      selectedCompassMonths = [String(data.default_compass_selection.month)];
+      selectedCompassMonths = data.default_compass_selection.months.map(String);
       render();
     }
 
