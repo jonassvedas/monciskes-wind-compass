@@ -1,6 +1,7 @@
 import csv
 import json
 import math
+import re
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 CSV_PATH = ROOT / "raw_data.csv"
 OUTPUT_PATH = ROOT / "monciskes_wind_compass.html"
+PUBLIC_DATA_PATH = ROOT / "monciskes_wind_compass_data.json"
 
 MS_TO_KT = 1.9438444924406
 KITE_MIN_MS = 6
@@ -351,12 +353,104 @@ def build_data(rows, invalid):
     }
 
 
+def compact_direction_profile(profile):
+    return {
+        "label": profile["label"],
+        "n": profile["n"],
+        "avg_ms": profile["avg_ms"],
+        "max_bin_ms": profile["max_bin_ms"],
+        "bins": [
+            {
+                "deg": item["deg"],
+                "dir": item["dir"],
+                "n": item["n"],
+                "avg_ms": item["avg_ms"],
+                "max_ms": item["max_ms"],
+            }
+            for item in profile["bins"]
+        ],
+    }
+
+
+def build_public_data(data):
+    profiles = data["direction_profiles"]
+    return {
+        "generated_at": data["generated_at"],
+        "collection": {
+            "readings": data["summary"]["count"],
+            "start": data["summary"]["start"][:10],
+            "end": data["summary"]["end"][:10],
+            "source": "juraspot.lt wind meter",
+        },
+        "default_compass_selection": data["default_compass_selection"],
+        "yearly": [{"year": item["year"]} for item in data["yearly"]],
+        "monthly": [
+            {
+                "month": item["month"],
+                "month_number": item["month_number"],
+            }
+            for item in data["monthly"]
+        ],
+        "direction_profiles": {
+            "years": {
+                year: compact_direction_profile(profile)
+                for year, profile in profiles["years"].items()
+            },
+            "year_months": {
+                key: compact_direction_profile(profile)
+                for key, profile in profiles["year_months"].items()
+            },
+        },
+    }
+
+
+def build_public_html():
+    html = HTML_TEMPLATE.replace(
+        "/*__DATA__*/",
+        "let data = null;",
+    )
+    # The visible page is compass-only. Strip old dashboard functions from the publish file
+    # so inspecting the deployed HTML does not expose unused metric names or dead code.
+    html = re.sub(
+        r"\n    function renderKpis\(\) \{.*?\n    function linePath",
+        "\n    function linePath",
+        html,
+        flags=re.S,
+    )
+    html = re.sub(
+        r"\n    function renderMonthlyChart\(\) \{.*?\n    function render\(\)",
+        "\n    function render()",
+        html,
+        flags=re.S,
+    )
+    html = html.replace(
+        "initializeDashboard();",
+        """async function loadDashboardData() {
+      try {
+        const response = await fetch("monciskes_wind_compass_data.json");
+        if (!response.ok) {
+          throw new Error(`Wind data request failed: ${response.status}`);
+        }
+        data = await response.json();
+        initializeDashboard();
+      } catch (error) {
+        console.error(error);
+        document.getElementById("compassLegend").innerHTML = '<div class="load-error">Could not load wind data.</div>';
+      }
+    }
+
+    loadDashboardData();""",
+    )
+    return html
+
+
 HTML_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Monciskes Wind Dashboard</title>
+  <title>Monciškės Wind Speed Compass</title>
+  <link rel="icon" href="favicon.ico">
   <style>
     :root {
       color-scheme: light;
@@ -406,7 +500,11 @@ HTML_TEMPLATE = """<!doctype html>
       line-height: 1.45;
       max-width: 760px;
     }
-    .controls {
+    .unit-toggle {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      z-index: 3;
       display: flex;
       align-items: center;
       gap: 10px;
@@ -420,14 +518,16 @@ HTML_TEMPLATE = """<!doctype html>
       border-radius: 8px;
       overflow: hidden;
       background: var(--soft);
-      min-width: 148px;
+      min-width: 116px;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, .08);
     }
     .segmented button {
       border: 0;
-      padding: 9px 12px;
+      padding: 7px 11px;
       background: transparent;
       color: var(--muted);
       font: inherit;
+      font-size: 12px;
       font-weight: 700;
       cursor: pointer;
     }
@@ -495,6 +595,7 @@ HTML_TEMPLATE = """<!doctype html>
       gap: 16px;
     }
     .panel {
+      position: relative;
       padding: 16px;
       min-width: 0;
     }
@@ -630,6 +731,9 @@ HTML_TEMPLATE = """<!doctype html>
     .wide {
       grid-column: 1 / -1;
     }
+    .compass-panel {
+      padding-top: 56px;
+    }
     .chart {
       width: 100%;
       min-height: 250px;
@@ -670,24 +774,93 @@ HTML_TEMPLATE = """<!doctype html>
       font-size: 11px;
     }
     .legend {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px 16px;
-      margin-top: 12px;
-      color: var(--muted);
+      margin-top: 16px;
       font-size: 13px;
+      overflow-x: auto;
     }
-    .legend span {
+    .legend-table {
+      width: 100%;
+      min-width: 720px;
+      border-collapse: separate;
+      border-spacing: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #fff;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, .05);
+    }
+    .legend-table th,
+    .legend-table td {
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      white-space: nowrap;
+      vertical-align: middle;
+    }
+    .legend-table th {
+      background: #f8fafc;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .legend-table th button {
+      border: 0;
+      padding: 0;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      letter-spacing: inherit;
+      text-transform: inherit;
+      cursor: pointer;
       display: inline-flex;
-      align-items: center;
       gap: 6px;
+      align-items: center;
+    }
+    .legend-table th button:hover {
+      color: var(--ink);
+    }
+    .legend-table tbody tr:hover {
+      background: #fbfdff;
+    }
+    .legend-table tr:last-child td {
+      border-bottom: 0;
+    }
+    .legend-table th:nth-child(n+3),
+    .legend-table td:nth-child(n+3) {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    .legend-table th:first-child,
+    .legend-table td:first-child {
+      width: 52px;
+      text-align: center;
+    }
+    .legend-table th:nth-child(2),
+    .legend-table td:nth-child(2) {
+      width: 28%;
     }
     .swatch {
-      width: 12px;
-      height: 12px;
-      border-radius: 3px;
+      width: 24px;
+      height: 4px;
+      border-radius: 999px;
       display: inline-block;
       flex: 0 0 auto;
+      box-shadow: 0 0 0 3px rgba(255, 255, 255, .92), 0 0 0 4px rgba(15, 23, 42, .08);
+    }
+    .legend-period {
+      font-weight: 850;
+      color: var(--ink);
+    }
+    .load-error {
+      padding: 12px 14px;
+      border: 1px solid #f2c2bc;
+      border-radius: 8px;
+      background: #fff5f3;
+      color: #9f2f27;
+      font-weight: 800;
+      text-align: center;
     }
     .insights {
       display: grid;
@@ -786,10 +959,11 @@ HTML_TEMPLATE = """<!doctype html>
       .button-stack { grid-template-columns: 1fr; justify-items: center; }
       .button-group { justify-content: center; max-width: none; }
       .year-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .controls { margin-top: 14px; justify-content: flex-start; }
+      .unit-toggle { top: 13px; right: 13px; }
       .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .value { font-size: 23px; }
       .panel { padding: 13px; }
+      .compass-panel { padding-top: 54px; }
       .compass-pair { grid-template-columns: 1fr; }
       .compass-chart svg { width: 100%; min-width: 0; }
       table { font-size: 12px; }
@@ -798,25 +972,36 @@ HTML_TEMPLATE = """<!doctype html>
     @media (max-width: 440px) {
       .kpis { grid-template-columns: 1fr; }
     }
+    :root { --ink: #4b4b4b; --muted: #757575; --line: #b0b0b0; --page: #ffffff; --soft: #f4f4f4; --shadow: none; }
+    body { max-width: 1320px; min-height: 100vh; margin: 0 auto; padding: 0 20px; font-family: Verdana, Tahoma, sans-serif; line-height: 1.55; }
+    header { min-height: 0; margin-top: 0; padding: 14px 0; border-top: 1px solid var(--line); background: transparent; }
+    .topbar, main { max-width: 1320px; }
+    h1 { margin: 0; font-family: Arial, Helvetica, sans-serif; font-size: 26px; font-weight: 100; line-height: 1.1; }
+    .collection-note { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+    main { padding: 18px 0 36px; }
+    .kpi, .panel, .legend-table { box-shadow: none; }
+    .compass-panel { padding: 54px 0 0; border: 0; }
+    .legend-table { border-radius: 0; }
   </style>
 </head>
 <body>
   <header>
     <div class="topbar">
       <div>
-        <h1>Monciskes Wind Compass</h1>
-      </div>
-      <div class="controls">
-        <div class="segmented" aria-label="Speed units">
-          <button id="msBtn" class="active" type="button">m/s</button>
-          <button id="ktBtn" type="button">kt</button>
-        </div>
+        <h1>Monciškės Wind Speed Compass</h1>
+        <p id="collectionNote" class="collection-note"></p>
       </div>
     </div>
   </header>
   <main>
     <section class="grid">
-      <div class="panel wide">
+      <div class="panel wide compass-panel">
+        <div class="unit-toggle">
+          <div class="segmented" aria-label="Speed units">
+            <button id="msBtn" class="active" type="button">m/s</button>
+            <button id="ktBtn" type="button">kt</button>
+          </div>
+        </div>
         <div class="panel-head">
           <div class="select-row">
             <div class="button-stack">
@@ -838,7 +1023,6 @@ HTML_TEMPLATE = """<!doctype html>
           </div>
         </div>
         <div class="legend" id="compassLegend">
-          <span><i class="swatch" style="background: #eef3f7"></i> East-sector excluded from planning view</span>
         </div>
       </div>
     </section>
@@ -847,11 +1031,13 @@ HTML_TEMPLATE = """<!doctype html>
     /*__DATA__*/
 
     let unit = "ms";
-    let selectedYear = String(data.yearly[data.yearly.length - 1].year);
-    let selectedCompassYears = [String(data.default_compass_selection.year)];
-    let selectedCompassMonths = [String(data.default_compass_selection.month)];
+    let selectedYear = "";
+    let selectedCompassYears = [];
+    let selectedCompassMonths = [];
     let averageAvgCompassProfiles = false;
     let averageMaxCompassProfiles = false;
+    let legendSortKey = "period";
+    let legendSortDir = "asc";
     const colors = {
       avg: "#2472a8",
       kite: "#4c9a2a",
@@ -937,6 +1123,16 @@ HTML_TEMPLATE = """<!doctype html>
         averageAvgCompassProfiles = !averageAvgCompassProfiles;
       }
       render();
+    }
+
+    function sortLegend(key) {
+      if (legendSortKey === key) {
+        legendSortDir = legendSortDir === "asc" ? "desc" : "asc";
+      } else {
+        legendSortKey = key;
+        legendSortDir = key === "period" ? "asc" : "desc";
+      }
+      renderLegend();
     }
 
     document.getElementById("msBtn").addEventListener("click", () => setUnit("ms"));
@@ -1113,6 +1309,74 @@ HTML_TEMPLATE = """<!doctype html>
       `;
     }
 
+    function sortMark(key) {
+      if (legendSortKey !== key) {
+        return "";
+      }
+      return legendSortDir === "asc" ? "<span aria-hidden=\\"true\\">↑</span>" : "<span aria-hidden=\\"true\\">↓</span>";
+    }
+
+    function legendRows() {
+      const profiles = compassProfiles(averageAvgCompassProfiles && averageMaxCompassProfiles).filter(Boolean);
+      return profiles.map((profile, index) => {
+        const strongest = profile.bins.reduce((best, item) => item.avg_ms > best.avg_ms ? item : best, profile.bins[0]);
+        const maxWind = Math.max(...profile.bins.map(item => item.max_ms), 0);
+        return {
+          color: profile.color || overlayPalette[index % overlayPalette.length],
+          period: profile.label,
+          readings: profile.n,
+          avg: profile.avg_ms,
+          strongest: strongest ? strongest.avg_ms : 0,
+          strongestDir: strongest ? `${strongest.deg}° ${strongest.dir}` : "-",
+          max: maxWind
+        };
+      }).sort((a, b) => {
+        const dir = legendSortDir === "asc" ? 1 : -1;
+        if (legendSortKey === "period") {
+          return a.period.localeCompare(b.period) * dir;
+        }
+        return (a[legendSortKey] - b[legendSortKey]) * dir;
+      });
+    }
+
+    function renderLegend() {
+      const rows = legendRows();
+      document.getElementById("compassLegend").innerHTML = `
+        <table class="legend-table">
+          <colgroup>
+            <col style="width:52px">
+            <col>
+            <col style="width:118px">
+            <col style="width:120px">
+            <col style="width:150px">
+            <col style="width:120px">
+          </colgroup>
+          <thead>
+            <tr>
+              <th>Line</th>
+              <th><button type="button" onclick="sortLegend('period')">Period${sortMark("period")}</button></th>
+              <th><button type="button" onclick="sortLegend('readings')">Readings${sortMark("readings")}</button></th>
+              <th><button type="button" onclick="sortLegend('avg')">Avg Wind${sortMark("avg")}</button></th>
+              <th><button type="button" onclick="sortLegend('strongest')">Strongest Bin${sortMark("strongest")}</button></th>
+              <th><button type="button" onclick="sortLegend('max')">Max Wind${sortMark("max")}</button></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(row => `
+              <tr>
+                <td><i class="swatch" style="background:${row.color}"></i></td>
+                <td class="legend-period">${row.period}</td>
+                <td>${row.readings.toLocaleString()}</td>
+                <td>${speedText(row.avg)}</td>
+                <td>${row.strongestDir} · ${speedText(row.strongest)}</td>
+                <td>${speedText(row.max)}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      `;
+    }
+
     function renderCompassPlot(targetId, mode) {
       const profiles = compassProfiles(mode === "max" ? averageMaxCompassProfiles : averageAvgCompassProfiles).filter(Boolean);
       const width = 560;
@@ -1200,9 +1464,6 @@ HTML_TEMPLATE = """<!doctype html>
           ${hoverTargets}
         `;
       }).join("");
-      document.getElementById("compassLegend").innerHTML = profiles.map((profile, index) => `
-        <span><i class="swatch" style="background:${profile.color || overlayPalette[index % overlayPalette.length]}"></i>${profile.label} · ${profile.n.toLocaleString()} readings · ${speedText(profile.avg_ms)}</span>
-      `).join("") + `<span><i class="swatch" style="background: #eef3f7"></i> East-sector excluded from planning view</span>`;
       document.getElementById(targetId).innerHTML = `
         <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Compass wind strength plot">
           <defs>
@@ -1221,7 +1482,7 @@ HTML_TEMPLATE = """<!doctype html>
           <circle cx="${cx}" cy="${cy}" r="${radius}" fill="none" stroke="${colors.muted}" stroke-width="1.5"/>
           ${overlays}
           ${ringLabels}
-          <text x="${cx}" y="24" text-anchor="middle" fill="${colors.text}" font-size="18" font-weight="850">${isMax ? "Maximum" : "Average"}</text>
+          <text x="${cx}" y="24" text-anchor="middle" fill="${colors.text}" font-size="18" font-weight="850">${isMax ? "Max Speed" : "Average Speed"}</text>
         </svg>
       `;
     }
@@ -1500,12 +1761,25 @@ HTML_TEMPLATE = """<!doctype html>
     }
 
     function render() {
+      if (!data) {
+        return;
+      }
       renderCompassControls();
       renderCompassPlot("compassPlotAvg", "avg");
       renderCompassPlot("compassPlotMax", "max");
+      renderLegend();
     }
 
-    render();
+    function initializeDashboard() {
+      const collection = data.collection;
+      document.getElementById("collectionNote").textContent = collection.readings.toLocaleString() + " readings collected from " + collection.start + " to " + collection.end + " using the " + collection.source + ".";
+      selectedYear = String(data.yearly[data.yearly.length - 1].year);
+      selectedCompassYears = [String(data.default_compass_selection.year)];
+      selectedCompassMonths = [String(data.default_compass_selection.month)];
+      render();
+    }
+
+    initializeDashboard();
   </script>
 </body>
 </html>
@@ -1515,9 +1789,14 @@ HTML_TEMPLATE = """<!doctype html>
 def main():
     rows, invalid = load_rows()
     data = build_data(rows, invalid)
-    html = HTML_TEMPLATE.replace("/*__DATA__*/", f"const data = {json.dumps(data, ensure_ascii=False, separators=(',', ':'))};")
-    OUTPUT_PATH.write_text(html, encoding="utf-8")
+    public_data = build_public_data(data)
+    PUBLIC_DATA_PATH.write_text(
+        json.dumps(public_data, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    OUTPUT_PATH.write_text(build_public_html(), encoding="utf-8")
     print(f"Wrote {OUTPUT_PATH}")
+    print(f"Wrote {PUBLIC_DATA_PATH}")
     print(
         "Active season avg: "
         f"{data['active_summary']['avg_ms']:.2f} m/s, "
