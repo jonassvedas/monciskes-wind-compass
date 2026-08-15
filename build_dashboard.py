@@ -377,10 +377,10 @@ def build_public_data(data):
     return {
         "generated_at": data["generated_at"],
         "collection": {
-            "readings": data["summary"]["count"],
             "start": data["summary"]["start"][:10],
             "end": data["summary"]["end"][:10],
-            "source": "juraspot.lt wind meter",
+            "source": "juraspot.lt",
+            "source_url": "https://juraspot.lt/",
         },
         "default_compass_selection": data["default_compass_selection"],
         "yearly": [{"year": item["year"]} for item in data["yearly"]],
@@ -978,6 +978,7 @@ HTML_TEMPLATE = """<!doctype html>
     .topbar, main { max-width: 1320px; }
     h1 { margin: 0; font-family: Arial, Helvetica, sans-serif; font-size: 26px; font-weight: 100; line-height: 1.1; }
     .collection-note { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+    .collection-note a { color: inherit; }
     main { padding: 18px 0 36px; }
     .kpi, .panel, .legend-table { box-shadow: none; }
     .compass-panel { padding: 54px 0 0; border: 0; }
@@ -1772,7 +1773,7 @@ HTML_TEMPLATE = """<!doctype html>
 
     function initializeDashboard() {
       const collection = data.collection;
-      document.getElementById("collectionNote").textContent = collection.readings.toLocaleString() + " readings collected from " + collection.start + " to " + collection.end + " using the " + collection.source + ".";
+      document.getElementById("collectionNote").innerHTML = 'Data source: <a href="' + collection.source_url + '" target="_blank" rel="noopener noreferrer">' + collection.source + '</a> wind meter. Collected from ' + collection.start + ' to ' + collection.end + '.';
       selectedYear = String(data.yearly[data.yearly.length - 1].year);
       selectedCompassYears = [String(data.default_compass_selection.year)];
       selectedCompassMonths = [String(data.default_compass_selection.month)];
