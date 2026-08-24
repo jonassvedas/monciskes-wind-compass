@@ -164,13 +164,34 @@ def direction_profile(records, label):
     }
 
 
+def daily_wind_profile(days, label):
+    bins = []
+    for day_number in range(1, 32):
+        matching_days = [day for day in days if int(day["date"][-2:]) == day_number]
+        mean_dir = circular_mean([day["dir_deg"] for day in matching_days])
+        bins.append(
+            {
+                "day": day_number,
+                "avg_ms": sum(day["avg_ms"] for day in matching_days) / len(matching_days) if matching_days else 0,
+                "days": len(matching_days),
+                "dir_deg": mean_dir,
+                "dir": direction_label(mean_dir),
+            }
+        )
+    return {"label": label, "bins": bins}
+
+
 def build_data(rows, invalid):
     speeds = [row["speed"] for row in rows]
     directions = [row["direction"] for row in rows]
     planning_rows = [row for row in rows if is_planning_record(row)]
     by_date = defaultdict(list)
+    active_rows_by_date = defaultdict(list)
     for row in planning_rows:
         by_date[row["dt"].date()].append(row)
+    for row in rows:
+        if is_active_month(row["dt"].month):
+            active_rows_by_date[row["dt"].date()].append(row)
 
     direction_counts = Counter(direction_label(row["direction"]) for row in planning_rows)
     kite_direction_counts = Counter(direction_label(row["direction"]) for row in planning_rows if is_kiteable(row["speed"]))
@@ -259,14 +280,31 @@ def build_data(rows, invalid):
     daily = []
     for date, records in sorted(by_date.items()):
         item = summarize(records)
+        full_day_direction = circular_mean(
+            row["direction"] for row in active_rows_by_date[date]
+        )
         item.update(
             {
                 "date": date.isoformat(),
                 "max_ms": max(row["speed"] for row in records),
                 "readings": len(records),
+                "dir_deg": full_day_direction,
+                "dir": direction_label(full_day_direction),
             }
         )
         daily.append(item)
+
+    daily_wind_profiles = {"years": {}, "year_months": {}}
+    for year in years:
+        daily_wind_profiles["years"][str(year)] = daily_wind_profile(
+            [day for day in daily if day["date"].startswith(f"{year}-")],
+            str(year),
+        )
+        for month in ACTIVE_MONTH_ORDER:
+            daily_wind_profiles["year_months"][f"{year}-{month}"] = daily_wind_profile(
+                [day for day in daily if day["date"].startswith(f"{year}-{month:02d}-")],
+                f"{year} {MONTH_NAMES[month - 1]}",
+            )
 
     rose = []
     for direction in COMPASS_16:
@@ -347,6 +385,7 @@ def build_data(rows, invalid):
         "yearly": yearly,
         "rose": rose,
         "direction_profiles": direction_profiles,
+        "daily_wind_profiles": daily_wind_profiles,
         "best_kite_days": sorted([day for day in daily if day["readings"] >= 6], key=lambda day: (day["kite_pct"], day["avg_ms"]), reverse=True)[:10],
         "windiest_days": sorted(daily, key=lambda day: day["avg_ms"], reverse=True)[:10],
     }
@@ -371,8 +410,16 @@ def compact_direction_profile(profile):
     }
 
 
+def compact_daily_wind_profile(profile):
+    return {
+        "label": profile["label"],
+        "bins": profile["bins"],
+    }
+
+
 def build_public_data(data):
     profiles = data["direction_profiles"]
+    daily_wind_profiles = data["daily_wind_profiles"]
     return {
         "generated_at": data["generated_at"],
         "collection": {
@@ -398,6 +445,16 @@ def build_public_data(data):
             "year_months": {
                 key: compact_direction_profile(profile)
                 for key, profile in profiles["year_months"].items()
+            },
+        },
+        "daily_wind_profiles": {
+            "years": {
+                year: compact_daily_wind_profile(profile)
+                for year, profile in daily_wind_profiles["years"].items()
+            },
+            "year_months": {
+                key: compact_daily_wind_profile(profile)
+                for key, profile in daily_wind_profiles["year_months"].items()
             },
         },
     }
@@ -747,11 +804,20 @@ HTML_TEMPLATE = """<!doctype html>
       min-width: 320px;
       margin: 0 auto;
     }
+    .daily-wind-chart {
+      width: 100%;
+      max-width: 1080px;
+    }
     .compass-pair {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 16px;
       align-items: start;
+    }
+    .compass-days-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      margin-top: 16px;
     }
     .compass-card {
       display: grid;
@@ -1022,6 +1088,11 @@ HTML_TEMPLATE = """<!doctype html>
             <div class="plot-action" id="compassMaxModeButton"></div>
           </div>
         </div>
+        <div class="compass-days-row">
+          <div class="compass-card">
+            <div id="dailyWindChart" class="chart daily-wind-chart"></div>
+          </div>
+        </div>
         <div class="legend" id="compassLegend">
         </div>
       </div>
@@ -1287,6 +1358,88 @@ HTML_TEMPLATE = """<!doctype html>
       return profiles;
     }
 
+    function combineDailyWindProfiles(profiles, label) {
+      const usable = profiles.filter(Boolean);
+      const bins = usable[0]?.bins.map((source, index) => ({
+        day: source.day,
+        avg_ms: usable.length
+          ? usable.reduce((sum, profile) => sum + profile.bins[index].avg_ms * profile.bins[index].days, 0) /
+            Math.max(usable.reduce((sum, profile) => sum + profile.bins[index].days, 0), 1)
+          : 0,
+        days: usable.reduce((sum, profile) => sum + profile.bins[index].days, 0),
+        dir_deg: weightedCircularMean(usable.map(profile => ({
+          deg: profile.bins[index].dir_deg,
+          weight: profile.bins[index].days
+        })))
+      })) || [];
+      bins.forEach(bin => { bin.dir = directionLabel(bin.dir_deg); });
+      return { label, bins };
+    }
+
+    function averageDailyWindProfiles(profiles, label) {
+      const usable = profiles.filter(Boolean);
+      const bins = usable[0]?.bins.map((source, index) => ({
+        day: source.day,
+        avg_ms: usable.length
+          ? usable.reduce((sum, profile) => sum + profile.bins[index].avg_ms, 0) / usable.length
+          : 0,
+        days: usable.reduce((sum, profile) => sum + profile.bins[index].days, 0),
+        dir_deg: weightedCircularMean(usable.map(profile => ({
+          deg: profile.bins[index].dir_deg,
+          weight: profile.bins[index].days
+        })))
+      })) || [];
+      bins.forEach(bin => { bin.dir = directionLabel(bin.dir_deg); });
+      return { label, bins };
+    }
+
+    function weightedCircularMean(values) {
+      const usable = values.filter(value => Number.isFinite(value.deg) && value.weight > 0);
+      if (!usable.length) return null;
+      const sin = usable.reduce((sum, value) => sum + Math.sin(value.deg * Math.PI / 180) * value.weight, 0);
+      const cos = usable.reduce((sum, value) => sum + Math.cos(value.deg * Math.PI / 180) * value.weight, 0);
+      return (Math.atan2(sin, cos) * 180 / Math.PI + 360) % 360;
+    }
+
+    function directionLabel(degrees) {
+      if (!Number.isFinite(degrees)) return "";
+      const labels = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+      return labels[Math.round(degrees / 22.5) % labels.length];
+    }
+
+    function isEastSector(degrees) {
+      return Number.isFinite(degrees) && degrees >= 45 && degrees <= 135;
+    }
+
+    function dailyWindProfiles(averageEnabled) {
+      const years = selectedCompassYears;
+      const months = selectedCompassMonths;
+      let profiles;
+      if (!years.length) {
+        return [];
+      }
+      if (!months.length) {
+        profiles = years.map(year => profileWithColor(data.daily_wind_profiles.years[year], yearColor(year))).filter(Boolean);
+      } else if (years.length === 1) {
+        profiles = months
+          .map(month => profileWithColor(data.daily_wind_profiles.year_months[`${years[0]}-${month}`], monthColor(month)))
+          .filter(Boolean);
+      } else if (months.length === 1) {
+        profiles = years
+          .map(year => profileWithColor(data.daily_wind_profiles.year_months[`${year}-${months[0]}`], yearColor(year)))
+          .filter(Boolean);
+      } else {
+        profiles = years.map(year => combineDailyWindProfiles(
+          months.map(month => data.daily_wind_profiles.year_months[`${year}-${month}`]),
+          `${year} ${compactMonthLabel(months)}`
+        )).map(profile => profileWithColor(profile, yearColor(profile.label.slice(0, 4))));
+      }
+      if (averageEnabled && profiles.length > 1) {
+        return [profileWithColor(averageDailyWindProfiles(profiles, "Average"), colors.teal)];
+      }
+      return profiles;
+    }
+
     function compassPoint(cx, cy, radius, degrees) {
       const radians = degrees * Math.PI / 180;
       return [cx + Math.sin(radians) * radius, cy - Math.cos(radians) * radius];
@@ -1451,21 +1604,24 @@ HTML_TEMPLATE = """<!doctype html>
         const area = points.length ? `${linePath(points)} Z` : "";
         const markers = profiles.length <= 3 ? profile.bins.map((item, index) => {
           const point = points[index];
-          const dotRadius = item.n ? 3.2 : 2;
-          return `<circle cx="${point[0]}" cy="${point[1]}" r="${dotRadius}" fill="${item.n ? color : "#b8c4cf"}"><title>${profile.label} · ${item.deg}° ${item.dir}: ${speedText(valueFor(item))} ${isMax ? "max" : "avg"}, ${item.n} readings</title></circle>`;
+          const hasValue = item.n > 0;
+          const dotRadius = hasValue ? 3.2 : 2;
+          const detail = `${speedText(valueFor(item))} ${isMax ? "max" : "avg"}, ${item.n} readings`;
+          return `<circle cx="${point[0]}" cy="${point[1]}" r="${dotRadius}" fill="${hasValue ? color : "#b8c4cf"}"><title>${profile.label} · ${item.deg}° ${item.dir}: ${detail}</title></circle>`;
         }).join("") : "";
         const hoverTargets = profile.bins.map((item, index) => {
           const point = points[index];
-          return `<circle cx="${point[0]}" cy="${point[1]}" r="10" fill="transparent" stroke="transparent" style="pointer-events:all"><title>${profile.label} · ${item.deg}° ${item.dir}: ${speedText(valueFor(item))} ${isMax ? "max" : "avg"}, ${item.n} readings</title></circle>`;
+          const detail = `${speedText(valueFor(item))} ${isMax ? "max" : "avg"}, ${item.n} readings`;
+          return `<circle cx="${point[0]}" cy="${point[1]}" r="10" fill="transparent" stroke="transparent" style="pointer-events:all"><title>${profile.label} · ${item.deg}° ${item.dir}: ${detail}</title></circle>`;
         }).join("");
         return `
-          <path d="${area}" fill="${profileIndex === 0 ? color : "transparent"}" fill-opacity=".12" stroke="${color}" stroke-width="${profiles.length > 4 ? 2.4 : 3.5}" stroke-linejoin="round"><title>${profile.label} · ${isMax ? "maximum" : "average"} wind profile</title></path>
+          <path d="${area}" fill="${profileIndex === 0 ? color : "transparent"}" fill-opacity=".12" stroke="${color}" stroke-width="${profiles.length > 4 ? 2.4 : 3.5}" stroke-linejoin="round"><title>${profile.label} · ${(isMax ? "maximum" : "average")} wind profile</title></path>
           ${markers}
           ${hoverTargets}
         `;
       }).join("");
       document.getElementById(targetId).innerHTML = `
-        <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Compass wind strength plot">
+        <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Wind strength compass plot">
           <defs>
             <clipPath id="compassClip"><circle cx="${cx}" cy="${cy}" r="${radius}"/></clipPath>
           </defs>
@@ -1483,6 +1639,51 @@ HTML_TEMPLATE = """<!doctype html>
           ${overlays}
           ${ringLabels}
           <text x="${cx}" y="24" text-anchor="middle" fill="${colors.text}" font-size="18" font-weight="850">${isMax ? "Max Speed" : "Average Speed"}</text>
+        </svg>
+      `;
+    }
+
+    function renderDailyWindChart() {
+      const profiles = dailyWindProfiles(false).filter(Boolean);
+      const width = 1040;
+      const height = 340;
+      const margin = { top: 38, right: 30, bottom: 42, left: 56 };
+      const innerW = width - margin.left - margin.right;
+      const innerH = height - margin.top - margin.bottom;
+      const maxValue = Math.max(...profiles.flatMap(profile => profile.bins.map(bin => speed(bin.avg_ms))), 1);
+      const x = day => margin.left + ((day - 1) / 30) * innerW;
+      const y = value => margin.top + innerH - (speed(value) / maxValue) * innerH;
+      const grid = [0, .25, .5, .75, 1].map(scale => {
+        const value = maxValue * scale;
+        const gridY = y(unit === "kt" ? value / 1.9438444924406 : value);
+        return `<line x1="${margin.left}" x2="${width - margin.right}" y1="${gridY}" y2="${gridY}" stroke="${colors.grid}"/><text class="axis" x="${margin.left - 9}" y="${gridY + 4}" text-anchor="end">${fmt.format(value)}</text>`;
+      }).join("");
+      const xLabels = [1, 5, 10, 15, 20, 25, 30, 31].map(day =>
+        `<text class="axis" x="${x(day)}" y="${height - 16}" text-anchor="middle">${day}</text>`
+      ).join("");
+      const lines = profiles.map((profile, index) => {
+        const color = profile.color || overlayPalette[index % overlayPalette.length];
+        const points = profile.bins.filter(bin => bin.days > 0).map(bin => [x(bin.day), y(bin.avg_ms)]);
+        const path = linePath(points);
+        const markers = profiles.length <= 4 ? profile.bins.filter(bin => bin.days > 0).map(bin => {
+          const direction = Number.isFinite(bin.dir_deg) ? `${bin.dir} (${Math.round(bin.dir_deg)}°)` : "unknown";
+          const arrowHidden = isEastSector(bin.dir_deg);
+          const tooltip = `${profile.label} · day ${bin.day}: ${speedText(bin.avg_ms)} daily average, direction ${direction}${arrowHidden ? " (arrow hidden: east sector)" : ""} (${bin.days} day${bin.days === 1 ? "" : "s"})`;
+          const arrow = !arrowHidden && Number.isFinite(bin.dir_deg)
+            ? `<g transform="translate(${x(bin.day)} ${y(bin.avg_ms)}) rotate(${bin.dir_deg})" pointer-events="none"><path d="M 0 -7 L 4.5 5 L 0 2.5 L -4.5 5 Z" fill="${color}" stroke="#ffffff" stroke-width="1.2" stroke-linejoin="round"/></g>`
+            : "";
+          return `${arrow}<circle cx="${x(bin.day)}" cy="${y(bin.avg_ms)}" r="10" fill="transparent" stroke="transparent" style="pointer-events:all"><title>${tooltip}</title></circle>`;
+        }).join("") : "";
+        return `<path d="${path}" fill="none" stroke="${color}" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><title>${profile.label} daily average wind</title></path>${markers}`;
+      }).join("");
+      document.getElementById("dailyWindChart").innerHTML = `
+        <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Daily average wind by day of month">
+          ${grid}
+          <line x1="${margin.left}" x2="${width - margin.right}" y1="${margin.top + innerH}" y2="${margin.top + innerH}" stroke="${colors.grid}"/>
+          ${xLabels}
+          ${lines}
+          <text x="${width / 2}" y="20" text-anchor="middle" fill="${colors.text}" font-size="18" font-weight="850">Daily Average Wind</text>
+          <text class="axis" x="${margin.left}" y="20">${unitLabel()}</text>
         </svg>
       `;
     }
@@ -1767,6 +1968,7 @@ HTML_TEMPLATE = """<!doctype html>
       renderCompassControls();
       renderCompassPlot("compassPlotAvg", "avg");
       renderCompassPlot("compassPlotMax", "max");
+      renderDailyWindChart();
       renderLegend();
     }
 
