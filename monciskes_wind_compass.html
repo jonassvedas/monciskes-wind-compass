@@ -1065,13 +1065,13 @@
           return compassPoint(cx, cy, r, item.deg);
         });
         const area = points.length ? `${linePath(points)} Z` : "";
-        const markers = profiles.length <= 3 ? profile.bins.map((item, index) => {
+        const markers = profile.bins.map((item, index) => {
           const point = points[index];
           const hasValue = item.n > 0;
           const dotRadius = hasValue ? 3.2 : 2;
           const detail = `${speedText(valueFor(item))} ${isMax ? "max" : "avg"}, ${item.n} readings`;
           return `<circle cx="${point[0]}" cy="${point[1]}" r="${dotRadius}" fill="${hasValue ? color : "#b8c4cf"}"><title>${profile.label} · ${item.deg}° ${item.dir}: ${detail}</title></circle>`;
-        }).join("") : "";
+        }).join("");
         const hoverTargets = profile.bins.map((item, index) => {
           const point = points[index];
           const detail = `${speedText(valueFor(item))} ${isMax ? "max" : "avg"}, ${item.n} readings`;
@@ -1128,7 +1128,7 @@
         const color = profile.color || overlayPalette[index % overlayPalette.length];
         const points = profile.bins.filter(bin => bin.days > 0).map(bin => [x(bin.day), y(bin.avg_ms)]);
         const path = linePath(points);
-        const markers = profiles.length <= 4 ? profile.bins.filter(bin => bin.days > 0).map(bin => {
+        const markers = profile.bins.filter(bin => bin.days > 0).map(bin => {
           const direction = Number.isFinite(bin.dir_deg) ? `${bin.dir} (${Math.round(bin.dir_deg)}°)` : "unknown";
           const arrowHidden = isEastSector(bin.dir_deg);
           const tooltip = `${profile.label} · day ${bin.day}: ${speedText(bin.avg_ms)} daily average, direction ${direction}${arrowHidden ? " (arrow hidden: east sector)" : ""} (${bin.days} day${bin.days === 1 ? "" : "s"})`;
@@ -1136,7 +1136,7 @@
             ? `<g transform="translate(${x(bin.day)} ${y(bin.avg_ms)}) rotate(${bin.dir_deg})" pointer-events="none"><path d="M 0 -7 L 4.5 5 L 0 2.5 L -4.5 5 Z" fill="${color}" stroke="#ffffff" stroke-width="1.2" stroke-linejoin="round"/></g>`
             : "";
           return `${arrow}<circle cx="${x(bin.day)}" cy="${y(bin.avg_ms)}" r="10" fill="transparent" stroke="transparent" style="pointer-events:all"><title>${tooltip}</title></circle>`;
-        }).join("") : "";
+        }).join("");
         return `<path d="${path}" fill="none" stroke="${color}" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><title>${profile.label} daily average wind</title></path>${markers}`;
       }).join("");
       document.getElementById("dailyWindChart").innerHTML = `
